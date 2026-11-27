@@ -14,6 +14,10 @@
     "wear_crit": 90
   },
   "slack_webhook": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+  "telegram": {
+    "bot_token": "123456:telegram-bot-token",
+    "chat_id": "123456789"
+  },
   "smtp": {
     "host": "smtp.example.com",
     "port": 587,

@@ -29,6 +29,7 @@ DEFAULTS = {
         "wear_warn": 80, "wear_crit": 90,
     },
     "slack_webhook": "",
+    "telegram": {"bot_token": "", "chat_id": ""},
     "smtp": {"host": "", "port": 587, "user": "", "password": "", "starttls": True,
              "from": "diskwatch@localhost", "to": []},
 }
@@ -165,6 +166,17 @@ def send_alert(cfg, subject, body):
             urllib.request.urlopen(req, timeout=10).read()
         except Exception as e:
             print(f"slack alert failed: {e}")
+    telegram = cfg["telegram"]
+    if telegram["bot_token"] and telegram["chat_id"]:
+        try:
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{telegram['bot_token']}/sendMessage",
+                data=json.dumps({"chat_id": telegram["chat_id"],
+                                 "text": f"{subject}\n{body}"}).encode(),
+                headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=10).read()
+        except Exception as e:
+            print(f"Telegram alert failed: {e}")
     s = cfg["smtp"]
     if s["host"] and s["to"]:
         try:

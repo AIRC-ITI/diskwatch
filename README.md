@@ -1,13 +1,13 @@
 # diskwatch
 
-Disk health tracking for Linux servers. A small agent on each server reports SMART data to a central server, which shows a dashboard and sends Slack/email alerts. Python 3 standard library only.
+Disk health tracking for Linux servers. A small agent on each server reports SMART data to a central server, which shows a dashboard and sends Slack, Telegram, and/or email alerts. Python 3 standard library only.
 
 ## Central server
 
 ```bash
 sudo mkdir -p /opt/diskwatch /etc/diskwatch
 sudo cp server.py /opt/diskwatch/
-sudo cp config.example.json /etc/diskwatch/config.json   # edit: token, Slack webhook, SMTP
+sudo cp config.example.json /etc/diskwatch/config.json   # edit: token, alert channels
 sudo cp systemd/diskwatch-server.service /etc/systemd/system/
 sudo systemctl enable --now diskwatch-server
 ```
@@ -39,6 +39,8 @@ Try it first: `sudo python3 /opt/diskwatch/agent.py --dry-run`
 | STALE | host has not reported for `stale_minutes` (default 90) |
 
 Alerts fire when a host's status changes, again every `realert_hours` while unresolved, and when it recovers.
+
+To enable Telegram alerts, create a bot with [@BotFather](https://t.me/BotFather), add it to the destination chat, and set `telegram.bot_token` and `telegram.chat_id` in the server config. Leave either value empty to disable Telegram alerts.
 
 ## Notes
 
