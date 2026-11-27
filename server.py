@@ -29,12 +29,12 @@ DEFAULTS = {
         "wear_warn": 80, "wear_crit": 90,
     },
     "slack_webhook": "",
-    "telegram": {"bot_token": "", "chat_id": ""},
+    "telegram": {"bot_token": "", "chat_id": "", "api_base": "https://api.telegram.org"},
     "smtp": {"host": "", "port": 587, "user": "", "password": "", "starttls": True,
              "from": "diskwatch@localhost", "to": []},
 }
 
-RANK = {"OK": 0, "WARN": 1, "STALE": 2, "CRIT": 3}
+RANK = {"N/A": 0, "OK": 0, "WARN": 1, "STALE": 2, "CRIT": 3}
 
 
 def load_config(path):
@@ -56,6 +56,9 @@ def evaluate_disk(d, t):
     """Return (status, [reasons]) for one disk record."""
     if d.get("error"):
         return "WARN", [f"could not read SMART data: {d['error']}"]
+    if d.get("no_smart"):
+        return "N/A", ["no SMART data readable (virtual disk, RAID/USB bridge, or missing "
+                       "root permissions); for VMs monitor the hypervisor instead"]
     status, reasons = "OK", []
 
     def bump(level, msg):
@@ -87,7 +90,8 @@ def evaluate_disk(d, t):
     if re is not None and re >= t["reallocated_warn"]:
         bump("CRIT" if re >= t["reallocated_crit"] else "WARN", f"{re} reallocated sectors")
     for key, label in (("pending_sectors", "pending sectors"),
-                       ("offline_uncorrectable", "offline uncorrectable sectors")):
+                       ("offline_uncorrectable", "offline uncorrectable sectors"),
+                       ("uncorrected_errors", "uncorrected read/write errors")):
         if d.get(key):
             bump("WARN", f"{d[key]} {label}")
 
@@ -107,8 +111,12 @@ def evaluate_host(report, t):
         d["_status"], d["_reasons"] = s, r
         if RANK[s] > RANK[host_status]:
             host_status = s
-        problems += [f"{d.get('device')} ({d.get('model') or '?'}): {x}" for x in r]
-    if not report.get("disks"):
+        if s != "N/A":
+            problems += [f"{d.get('device')} ({d.get('model') or '?'}): {x}" for x in r]
+    disks = report.get("disks", [])
+    if disks and all(d["_status"] == "N/A" for d in disks):
+        host_status = "N/A"
+    if not disks:
         host_status, problems = "WARN", ["no disks reported (smartctl found nothing?)"]
     return host_status, problems
 
@@ -166,17 +174,19 @@ def send_alert(cfg, subject, body):
             urllib.request.urlopen(req, timeout=10).read()
         except Exception as e:
             print(f"slack alert failed: {e}")
-    telegram = cfg["telegram"]
-    if telegram["bot_token"] and telegram["chat_id"]:
+    tg = cfg["telegram"]
+    if tg["bot_token"] and tg["chat_id"]:
         try:
+            # Plain text (no parse_mode) so device names/models never break formatting.
+            text = f"{subject}\n{body}"[:4000]  # Telegram limit is 4096 chars
             req = urllib.request.Request(
-                f"https://api.telegram.org/bot{telegram['bot_token']}/sendMessage",
-                data=json.dumps({"chat_id": telegram["chat_id"],
-                                 "text": f"{subject}\n{body}"}).encode(),
+                f"{tg['api_base'].rstrip('/')}/bot{tg['bot_token']}/sendMessage",
+                data=json.dumps({"chat_id": tg["chat_id"], "text": text}).encode(),
                 headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=10).read()
         except Exception as e:
-            print(f"Telegram alert failed: {e}")
+            # Don't print the exception text: it can contain the URL with the bot token.
+            print(f"telegram alert failed: {type(e).__name__}")
     s = cfg["smtp"]
     if s["host"] and s["to"]:
         try:
@@ -196,6 +206,8 @@ def send_alert(cfg, subject, body):
 
 def maybe_alert(cfg, store, host, status, problems, last_status, last_at, now):
     """Alert on status change, and re-alert on unresolved problems every realert_hours."""
+    if status == "N/A":  # nothing to monitor (e.g. a VM with virtual disks): never alert
+        return
     last_status = last_status or "OK"
     changed = status != last_status
     repeat = status != "OK" and last_at and now - last_at > cfg["realert_hours"] * 3600
@@ -257,15 +269,20 @@ def render(hosts, now):
         for d in h["report"].get("disks", []):
             st = d.get("_status", "OK")
             wear = d.get("nvme_percentage_used", d.get("ssd_wear_used_pct"))
-            kind = "NVMe" if "nvme_percentage_used" in d else ("HDD" if d.get("rotation_rate") else "SSD")
-            temp = "" if d.get("temperature_c") is None else "%s°C" % d["temperature_c"]
-            poh = "" if d.get("power_on_hours") is None else "{:,} h".format(d["power_on_hours"])
-            wear_s = "" if wear is None else "%s%%" % wear
+            if d.get("no_smart"):
+                kind = "Virtual" if d.get("virtual") else "No SMART"
+            else:
+                kind = "NVMe" if "nvme_percentage_used" in d else ("HDD" if d.get("rotation_rate") else "SSD")
+            temp = "–" if d.get("temperature_c") is None else "%s°C" % d["temperature_c"]
+            poh = "–" if d.get("power_on_hours") is None else "{:,} h".format(d["power_on_hours"])
+            wear_s = "–" if wear is None else "%s%%" % wear
+            realloc = d.get("reallocated_sectors")
+            realloc_s = "–" if realloc is None else str(realloc)
             disk_rows.append(
                 f"<tr><td>{e(str(d.get('device')))}</td><td>{kind}</td>"
                 f"<td>{e(str(d.get('model') or '?'))}</td><td>{fmt_bytes(d.get('capacity_bytes'))}</td>"
                 f"<td>{temp}</td><td>{poh}</td><td>{wear_s}</td>"
-                f"<td>{e(str(d.get('reallocated_sectors', '')))}</td>"
+                f"<td>{e(realloc_s)}</td>"
                 f"<td><span class='b {st}'>{st}</span> {e('; '.join(d.get('_reasons', [])))}</td></tr>")
         age = now - h["last_seen"]
         rows.append(
@@ -274,7 +291,7 @@ def render(hosts, now):
             f"<span class='m'>{len(h['report'].get('disks', []))} disks · last report {ago(age)}</span></summary>"
             f"<table><tr><th>Device</th><th>Type</th><th>Model</th><th>Size</th><th>Temp</th>"
             f"<th>Power-on</th><th>Wear</th><th>Realloc</th><th>Status</th></tr>{''.join(disk_rows)}</table></details>")
-    summary = " ".join(f"<span class='b {k}'>{counts[k]} {k}</span>" for k in ("CRIT", "STALE", "WARN", "OK") if counts[k])
+    summary = " ".join(f"<span class='b {k}'>{counts[k]} {k}</span>" for k in ("CRIT", "STALE", "WARN", "OK", "N/A") if counts[k])
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="60">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Disk Health</title><style>
 body{{font:14px system-ui,sans-serif;margin:0;padding:24px;background:#f6f7f9;color:#1a1d21}}
@@ -285,7 +302,7 @@ table{{border-collapse:collapse;width:100%;margin-top:10px;font-size:13px}}
 th,td{{text-align:left;padding:5px 8px;border-top:1px solid #eef0f3}} th{{color:#6b7280;font-weight:500}}
 .b{{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-right:6px}}
 .OK{{background:#d9f2e3;color:#0d6b35}} .WARN{{background:#fff0c2;color:#7a5800}}
-.CRIT{{background:#fbd5d5;color:#a11}} .STALE{{background:#e3e5e8;color:#444}}
+.CRIT{{background:#fbd5d5;color:#a11}} .STALE,.N\\/A{{background:#e3e5e8;color:#444}}
 @media(prefers-color-scheme:dark){{body{{background:#14161a;color:#e6e8eb}}details{{background:#1d2026;border-color:#2c3038}}
 th,td{{border-color:#2c3038}}}}
 </style></head><body><h1>Disk Health</h1><div class="sum">{summary or 'No hosts have reported yet.'}</div>

@@ -18,6 +18,9 @@ import time
 import urllib.request
 
 
+VIRTUAL_WORDS = ("qemu", "vmware", "virtual", "vbox", "msft", "hyper-v", "xen", "bhyve")
+
+
 def run_json(cmd):
     """Run a command and parse its JSON stdout. smartctl uses non-zero exit codes
     as bit flags even when output is valid, so we ignore the return code."""
@@ -41,23 +44,41 @@ def ata_attr(data, attr_id):
 
 
 def collect_device(dev, dtype):
-    cmd = ["smartctl", "-a", "-j", dev]
-    if dtype:
-        cmd[3:3] = ["-d", dtype]
-    d = run_json(cmd)
-    if not d:
-        return {"device": dev, "error": "smartctl returned no data"}
+    # `smartctl --scan` labels most SATA disks "-d scsi". Forcing that type hides the ATA SMART
+    # data (temperature, wear, sectors), so for scsi let smartctl auto-detect, then try SAT.
+    attempts = [None, "sat"] if dtype in (None, "scsi") else [dtype]
+    best = None
+    for t in attempts:
+        cmd = ["smartctl", "-a", "-j"] + (["-d", t] if t else []) + [dev]
+        d = run_json(cmd)
+        if not d:
+            continue
+        out = parse_device(d, dev, t or dtype)
+        if best is None:
+            best = out
+        if not out["no_smart"]:
+            return out
+    return best or {"device": dev, "error": "smartctl returned no data"}
+
+
+def parse_device(d, dev, dtype):
+
+    # SCSI/SAS/SAT/virtual devices report vendor+product instead of model_name.
+    vendor, product = d.get("vendor"), d.get("product")
+    model = d.get("model_name") or " ".join(
+        x for x in (vendor if vendor not in (None, "ATA") else None, product) if x) or None
 
     out = {
         "device": dev,
         "type": d.get("device", {}).get("type", dtype),
-        "model": d.get("model_name"),
+        "model": model,
         "serial": d.get("serial_number"),
-        "firmware": d.get("firmware_version"),
+        "firmware": d.get("firmware_version") or d.get("revision"),
         "capacity_bytes": d.get("user_capacity", {}).get("bytes"),
         "rotation_rate": d.get("rotation_rate"),
         "smart_passed": d.get("smart_status", {}).get("passed"),
-        "temperature_c": d.get("temperature", {}).get("current"),
+        # virtual disks report 0 here; treat 0 as "unknown"
+        "temperature_c": d.get("temperature", {}).get("current") or None,
         "power_on_hours": d.get("power_on_time", {}).get("hours"),
     }
 
@@ -73,14 +94,15 @@ def collect_device(dev, dtype):
         })
     else:
         out.update({
-            "reallocated_sectors": ata_attr(d, 5),
+            "reallocated_sectors": (ata_attr(d, 5) if ata_attr(d, 5) is not None
+                                    else d.get("scsi_grown_defect_list")),
             "pending_sectors": ata_attr(d, 197),
             "offline_uncorrectable": ata_attr(d, 198),
             "crc_errors": ata_attr(d, 199),
             "ssd_wear_used_pct": None,
         })
         # Wear indicators differ by vendor: 177 (Samsung wear leveling), 231 (SSD life left), 233 (Media wearout)
-        for aid in (231, 233):
+        for aid in (177, 231, 233):
             for a in d.get("ata_smart_attributes", {}).get("table", []):
                 if a.get("id") == aid and a.get("value") is not None:
                     out["ssd_wear_used_pct"] = 100 - a["value"]
@@ -88,6 +110,21 @@ def collect_device(dev, dtype):
             out["temperature_c"] = ata_attr(d, 194)
             if out["temperature_c"] is not None:
                 out["temperature_c"] &= 0xFF  # raw value may pack min/max in upper bytes
+                out["temperature_c"] = out["temperature_c"] or None
+
+    # SCSI error counters (SAS drives, some SATA behind HBAs)
+    log = d.get("scsi_error_counter_log") or {}
+    unc = [v["total_uncorrected_errors"] for v in log.values()
+           if isinstance(v, dict) and v.get("total_uncorrected_errors") is not None]
+    if unc:
+        out["uncorrected_errors"] = sum(unc)
+
+    # Flag disks that expose no usable health data (typically virtual disks in a VM).
+    ident = " ".join(str(x) for x in (vendor, product, d.get("model_name")) if x).lower()
+    has_health = bool(nvme or d.get("ata_smart_attributes") or log
+                      or d.get("scsi_grown_defect_list") is not None)
+    out["virtual"] = any(w in ident for w in VIRTUAL_WORDS)
+    out["no_smart"] = out["virtual"] or not has_health
     return out
 
 
