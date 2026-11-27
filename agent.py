@@ -43,6 +43,27 @@ def ata_attr(data, attr_id):
     return None
 
 
+# SSD wear attributes. The normalized VALUE counts down from 100 (new) to 0 (worn out),
+# so used% = 100 - value. Vendors use different IDs (Samsung 173/177, others 231/233),
+# so match by attribute name first and fall back to well-known IDs.
+WEAR_NAMES = ("wear_leveling", "wearout", "wear_out", "ssd_life_left",
+              "lifetime_remain", "remaining_lifetime", "life_remaining")
+WEAR_IDS = (177, 173, 231, 233)
+
+
+def ssd_wear_used(d):
+    table = d.get("ata_smart_attributes", {}).get("table", [])
+    usable = [a for a in table if isinstance(a.get("value"), int) and 0 <= a["value"] <= 100]
+    for a in usable:
+        if any(n in (a.get("name") or "").lower() for n in WEAR_NAMES):
+            return 100 - a["value"]
+    for wid in WEAR_IDS:
+        for a in usable:
+            if a.get("id") == wid:
+                return 100 - a["value"]
+    return None
+
+
 def collect_device(dev, dtype):
     # `smartctl --scan` labels most SATA disks "-d scsi". Forcing that type hides the ATA SMART
     # data (temperature, wear, sectors), so for scsi let smartctl auto-detect, then try SAT.
@@ -101,11 +122,8 @@ def parse_device(d, dev, dtype):
             "crc_errors": ata_attr(d, 199),
             "ssd_wear_used_pct": None,
         })
-        # Wear indicators differ by vendor: 177 (Samsung wear leveling), 231 (SSD life left), 233 (Media wearout)
-        for aid in (177, 231, 233):
-            for a in d.get("ata_smart_attributes", {}).get("table", []):
-                if a.get("id") == aid and a.get("value") is not None:
-                    out["ssd_wear_used_pct"] = 100 - a["value"]
+        if not d.get("rotation_rate"):  # SSDs only
+            out["ssd_wear_used_pct"] = ssd_wear_used(d)
         if out["temperature_c"] is None:
             out["temperature_c"] = ata_attr(d, 194)
             if out["temperature_c"] is not None:
