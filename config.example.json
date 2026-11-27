@@ -1,0 +1,26 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 8080,
+  "token": "PUT-A-LONG-RANDOM-STRING-HERE",
+  "db_path": "/var/lib/diskwatch/diskwatch.db",
+  "stale_minutes": 90,
+  "realert_hours": 24,
+  "thresholds": {
+    "temp_warn": 60,
+    "temp_crit": 70,
+    "reallocated_warn": 1,
+    "reallocated_crit": 50,
+    "wear_warn": 80,
+    "wear_crit": 90
+  },
+  "slack_webhook": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+  "smtp": {
+    "host": "smtp.example.com",
+    "port": 587,
+    "user": "alerts@example.com",
+    "password": "app-password",
+    "starttls": true,
+    "from": "diskwatch@example.com",
+    "to": ["ops@example.com"]
+  }
+}

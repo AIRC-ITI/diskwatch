@@ -1,0 +1,8 @@
+[Unit]
+Description=diskwatch agent (one-shot SMART report)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/diskwatch/agent.env
+ExecStart=/usr/bin/python3 /opt/diskwatch/agent.py
