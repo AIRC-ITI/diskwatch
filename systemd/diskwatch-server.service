@@ -5,7 +5,8 @@ After=network-online.target
 [Service]
 ExecStart=/usr/bin/python3 /opt/diskwatch/server.py --config /etc/diskwatch/config.json
 StateDirectory=diskwatch
-DynamicUser=yes
+User=diskwatch
+Group=diskwatch
 Restart=on-failure
 
 [Install]

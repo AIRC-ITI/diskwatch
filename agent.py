@@ -152,10 +152,26 @@ def collect():
     for dev in scan.get("devices", []):
         disks.append(collect_device(dev["name"], dev.get("type")))
     return {
-        "hostname": socket.getfqdn() or socket.gethostname(),
+        "hostname": hostname(),
         "collected_at": int(time.time()),
         "disks": disks,
     }
+
+
+def hostname():
+    return socket.getfqdn() or socket.gethostname()
+
+
+def unregister(server, token):
+    """Ask the server to forget this host (used when uninstalling)."""
+    req = urllib.request.Request(
+        server.rstrip("/") + "/api/unregister",
+        data=json.dumps({"hostname": hostname()}).encode(),
+        headers={"Content-Type": "application/json", "X-Diskwatch-Token": token},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read()).get("removed", 0)
 
 
 def send(server, token, report):
@@ -174,7 +190,19 @@ def main():
     ap.add_argument("--server", default=os.environ.get("DISKWATCH_SERVER"))
     ap.add_argument("--token", default=os.environ.get("DISKWATCH_TOKEN"))
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--unregister", action="store_true",
+                    help="remove this host from the server's dashboard, then exit")
     args = ap.parse_args()
+
+    if args.unregister:
+        if not args.server or not args.token:
+            sys.exit("--server and --token are required (or set DISKWATCH_SERVER / DISKWATCH_TOKEN)")
+        try:
+            removed = unregister(args.server, args.token)
+        except Exception as e:
+            sys.exit(f"failed to unregister: {e}")
+        print(f"removed {hostname()} from the dashboard" if removed else f"{hostname()} was not on the dashboard")
+        return
 
     if os.geteuid() != 0:
         print("warning: not running as root, smartctl may fail", file=sys.stderr)

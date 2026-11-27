@@ -161,6 +161,13 @@ class Store:
             self.db.execute("UPDATE hosts SET last_alert_status=?, last_alert_at=? WHERE hostname=?",
                             (status, now, host))
 
+    def delete_host(self, host):
+        """Remove a host and its history. Returns the number of host rows deleted."""
+        with self.lock, self.db:
+            n = self.db.execute("DELETE FROM hosts WHERE hostname=?", (host,)).rowcount
+            self.db.execute("DELETE FROM readings WHERE hostname=?", (host,))
+        return n
+
 
 # ---------- alerts ----------
 
@@ -338,10 +345,18 @@ def make_handler(cfg, store):
                 self._send(404, "not found", "text/plain")
 
         def do_POST(self):
-            if self.path != "/api/report":
+            if self.path not in ("/api/report", "/api/unregister"):
                 return self._send(404, "not found", "text/plain")
             if self.headers.get("X-Diskwatch-Token") != cfg["token"]:
                 return self._send(401, "bad token", "text/plain")
+            if self.path == "/api/unregister":
+                try:
+                    n = min(int(self.headers.get("Content-Length", 0)), 10_000)
+                    host = str(json.loads(self.rfile.read(n))["hostname"])[:255]
+                except Exception:
+                    return self._send(400, "invalid request", "text/plain")
+                return self._send(200, json.dumps({"removed": store.delete_host(host)}),
+                                  "application/json")
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 if n > 2_000_000:
@@ -365,8 +380,14 @@ def make_handler(cfg, store):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=None)
+    ap.add_argument("--remove-host", metavar="HOSTNAME",
+                    help="delete a host (and its history) from the database, then exit")
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.remove_host:
+        n = Store(cfg["db_path"]).delete_host(args.remove_host)
+        print(f"removed {args.remove_host}" if n else f"no host named {args.remove_host!r} found")
+        return
     if cfg["token"] == "change-me":
         print("WARNING: using the default token; set one in your config file")
     store = Store(cfg["db_path"])

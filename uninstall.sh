@@ -18,6 +18,7 @@ UNITS=(diskwatch-agent.timer diskwatch-agent.service diskwatch-server.service)
 ASSUME_YES=0
 KEEP_DATA=0
 REMOVE_SMART=0
+UNREGISTER=1
 
 usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -26,6 +27,7 @@ for arg in "$@"; do
     -y|--yes) ASSUME_YES=1 ;;
     --keep-data) KEEP_DATA=1 ;;
     --remove-smartmontools) REMOVE_SMART=1 ;;
+    --no-unregister) UNREGISTER=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
   esac
@@ -77,6 +79,17 @@ if [[ ${#data_paths[@]} -gt 0 ]]; then
     for p in "${data_paths[@]}"; do echo "    - $p"; done
   fi
 fi
+AGENT_ENV="$CONF_DIR/agent.env"
+if [[ $UNREGISTER -eq 1 && -f "$AGENT_ENV" && -f "$APP_DIR/agent.py" ]]; then
+  echo "  Remove this host from the dashboard on the diskwatch server (--no-unregister to skip)"
+else
+  UNREGISTER=0
+fi
+REMOVE_USER=0
+if [[ $KEEP_DATA -eq 0 && -z "$ROOT" ]] && id diskwatch >/dev/null 2>&1; then
+  REMOVE_USER=1
+  echo "  Delete the 'diskwatch' system user created by install.sh"
+fi
 [[ $REMOVE_SMART -eq 1 ]] && echo "  Uninstall the smartmontools package"
 echo
 
@@ -112,6 +125,19 @@ if [[ $HAVE_SYSTEMCTL -eq 1 ]]; then
   systemctl reset-failed 'diskwatch-*' >/dev/null 2>&1 || true
 fi
 
+# Remove this host from the dashboard. Done after the timer is stopped so it cannot
+# report again, and before the program files and config (token) are deleted.
+if [[ $UNREGISTER -eq 1 ]]; then
+  srv="$(grep -E '^DISKWATCH_SERVER=' "$AGENT_ENV" | head -1 | cut -d= -f2- || true)"
+  tok="$(grep -E '^DISKWATCH_TOKEN=' "$AGENT_ENV" | head -1 | cut -d= -f2- || true)"
+  if DISKWATCH_SERVER="$srv" DISKWATCH_TOKEN="$tok" python3 "$APP_DIR/agent.py" --unregister; then
+    :
+  else
+    echo "Could not reach the server. On the server, remove this host with:"
+    echo "  python3 /opt/diskwatch/server.py --config /etc/diskwatch/config.json --remove-host $(hostname -f 2>/dev/null || hostname)"
+  fi
+fi
+
 for p in "${found_paths[@]}"; do
   rm -rf "$p"
   echo "removed $p"
@@ -126,6 +152,10 @@ else
   for p in "${data_paths[@]}"; do echo "kept $p"; done
 fi
 
+if [[ $REMOVE_USER -eq 1 ]]; then
+  userdel diskwatch >/dev/null 2>&1 && echo "removed user diskwatch" || echo "could not remove user diskwatch"
+fi
+
 if [[ $REMOVE_SMART -eq 1 && -z "$ROOT" ]]; then
   if command -v apt-get >/dev/null 2>&1; then
     apt-get remove -y smartmontools
@@ -138,5 +168,3 @@ fi
 
 echo
 echo "diskwatch has been uninstalled."
-echo "If the diskwatch server is still running elsewhere, it will mark this host as"
-echo "STALE after a while; that is expected once the agent is gone."
